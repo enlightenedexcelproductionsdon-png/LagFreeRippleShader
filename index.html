@@ -1,0 +1,287 @@
+```html
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>High-Perf Ripple Shader</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        body { background-color: #020617; color: #f8fafc; font-family: system-ui, -apple-system, sans-serif; }
+        canvas { max-width: 100%; height: auto; border-radius: 0.75rem; background: #000; }
+        .glass-panel { @apply bg-slate-900/50 backdrop-blur-md border border-slate-700/50 rounded-2xl p-6; }
+        .control-group { @apply bg-slate-950/50 p-4 rounded-xl border border-slate-800 flex flex-col space-y-2; }
+        label { @apply text-[10px] font-bold text-slate-500 uppercase tracking-widest; }
+        input[type="range"] { @apply h-1.5 bg-slate-800 rounded-lg appearance-none cursor-pointer accent-blue-500; }
+    </style>
+</head>
+<body class="min-h-screen flex flex-col items-center p-4 md:p-8">
+    <div class="max-w-6xl w-full space-y-6">
+        <header class="flex justify-between items-center bg-slate-900/80 p-4 rounded-2xl border border-slate-700">
+            <div>
+                <h1 class="text-xl font-bold bg-gradient-to-r from-blue-400 to-emerald-400 bg-clip-text text-transparent">Lag-Free Ripple Shader</h1>
+                <p class="text-xs text-slate-500">Optimized GLSL Pipeline</p>
+            </div>
+            <div class="flex gap-3">
+                <label class="cursor-pointer bg-slate-800 hover:bg-slate-700 text-slate-200 px-4 py-2 rounded-lg text-sm font-semibold transition border border-slate-600">
+                    Load Video
+                    <input type="file" id="videoInput" accept="video/*" class="hidden">
+                </label>
+                <button id="exportBtn" disabled class="bg-blue-600 hover:bg-blue-500 disabled:opacity-30 text-white px-4 py-2 rounded-lg text-sm font-semibold transition shadow-lg shadow-blue-900/20">
+                    Export Result
+                </button>
+            </div>
+        </header>
+
+        <div class="grid lg:grid-cols-4 gap-6">
+            <!-- Parameters Sidebar -->
+            <div class="lg:col-span-1 space-y-3">
+                <div class="control-group">
+                    <div class="flex justify-between items-center"><label>Strength</label><span id="val-amp" class="text-xs text-blue-400 font-mono">0.50</span></div>
+                    <input type="range" id="param-amp" min="0" max="1" step="0.01" value="0.5">
+                </div>
+
+                <div class="control-group">
+                    <div class="flex justify-between items-center"><label>Scale</label><span id="val-freq" class="text-xs text-blue-400 font-mono">50.0</span></div>
+                    <input type="range" id="param-freq" min="5" max="150" step="1" value="50">
+                </div>
+
+                <div class="control-group">
+                    <div class="flex justify-between items-center"><label>Flow Speed</label><span id="val-speed" class="text-xs text-blue-400 font-mono">4.0</span></div>
+                    <input type="range" id="param-speed" min="0" max="20" step="0.5" value="4">
+                </div>
+
+                <div class="control-group">
+                    <div class="flex justify-between items-center"><label>Focus X</label><span id="val-cx" class="text-xs text-blue-400 font-mono">0.50</span></div>
+                    <input type="range" id="param-cx" min="0" max="1" step="0.01" value="0.5">
+                </div>
+
+                <div class="control-group">
+                    <div class="flex justify-between items-center"><label>Focus Y</label><span id="val-cy" class="text-xs text-blue-400 font-mono">0.50</span></div>
+                    <input type="range" id="param-cy" min="0" max="1" step="0.01" value="0.5">
+                </div>
+
+                <div class="p-4 text-[10px] text-slate-600 leading-relaxed uppercase tracking-tighter">
+                    Note: High speed values use precision timers to ensure zero-jitter animation frames.
+                </div>
+            </div>
+
+            <!-- Viewport Area -->
+            <div class="lg:col-span-3 glass-panel flex flex-col">
+                <div class="flex-grow flex items-center justify-center relative overflow-hidden rounded-lg bg-black/40 min-h-[400px]">
+                    <canvas id="glCanvas"></canvas>
+                </div>
+                
+                <div class="mt-6 space-y-4">
+                    <div class="flex items-center gap-4">
+                        <span id="currentTime" class="text-xs font-mono text-slate-400 w-12">0:00</span>
+                        <div class="relative flex-grow h-1.5 bg-slate-800 rounded-full">
+                            <input type="range" id="seekBar" value="0" step="0.001" class="absolute w-full h-full opacity-0 cursor-pointer z-10">
+                            <div id="progressFill" class="absolute left-0 top-0 h-full bg-blue-500 rounded-full w-0"></div>
+                        </div>
+                        <span id="duration" class="text-xs font-mono text-slate-400 w-12 text-right">0:00</span>
+                    </div>
+                    <div id="status" class="text-center text-[10px] font-bold text-slate-500 uppercase tracking-widest">Idle</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <video id="videoElement" class="hidden" loop muted crossorigin="anonymous"></video>
+
+    <script>
+        const canvas = document.getElementById('glCanvas');
+        const gl = canvas.getContext('webgl', { 
+            antialias: false, 
+            depth: false, 
+            preserveDrawingBuffer: true,
+            alpha: false 
+        });
+        const video = document.getElementById('videoElement');
+        const videoInput = document.getElementById('videoInput');
+        const exportBtn = document.getElementById('exportBtn');
+        const status = document.getElementById('status');
+        const seekBar = document.getElementById('seekBar');
+        const progressFill = document.getElementById('progressFill');
+
+        const params = {
+            amp: document.getElementById('param-amp'),
+            freq: document.getElementById('param-freq'),
+            speed: document.getElementById('param-speed'),
+            cx: document.getElementById('param-cx'),
+            cy: document.getElementById('param-cy')
+        };
+
+        let program, texture, isRecording = false;
+        let lastTime = performance.now();
+        let internalClock = 0;
+
+        const vsSource = `
+            attribute vec2 position;
+            varying vec2 vUv;
+            void main() {
+                vUv = position * 0.5 + 0.5;
+                vUv.y = 1.0 - vUv.y;
+                gl_Position = vec4(position, 0.0, 1.0);
+            }
+        `;
+
+        const fsSource = `
+            precision highp float;
+            varying vec2 vUv;
+            uniform sampler2D uSampler;
+            uniform vec2 uResolution;
+            uniform float uTime;
+            uniform float uAmplitude;
+            uniform float uFrequency;
+            uniform float uSpeed;
+            uniform vec2 uCenter;
+
+            void main() {
+                vec2 center = uCenter;
+                vec2 uv = vUv;
+                
+                // Vectorized displacement for lag-free performance
+                vec2 diff = (uv - center) * uResolution;
+                float dist = length(diff);
+                
+                // Optimized Sine Wave Calculation
+                float phase = (dist / uFrequency) - (uTime * uSpeed);
+                float distortion = 1.0 + (uAmplitude * sin(phase));
+                
+                vec2 targetUv = center + (uv - center) * distortion;
+                
+                // Fast bounds check
+                if (any(lessThan(targetUv, vec2(0.0))) || any(greaterThan(targetUv, vec2(1.0)))) {
+                    gl_FragColor = vec4(0.0, 0.0, 0.0, 1.0);
+                } else {
+                    gl_FragColor = texture2D(uSampler, targetUv);
+                }
+            }
+        `;
+
+        function initGL() {
+            const vs = gl.createShader(gl.VERTEX_SHADER);
+            gl.shaderSource(vs, vsSource);
+            gl.compileShader(vs);
+
+            const fs = gl.createShader(gl.FRAGMENT_SHADER, fsSource);
+            gl.shaderSource(fs, fsSource);
+            gl.compileShader(fs);
+
+            program = gl.createProgram();
+            gl.attachShader(program, vs);
+            gl.attachShader(program, fs);
+            gl.linkProgram(program);
+            gl.useProgram(program);
+
+            const buffer = gl.createBuffer();
+            gl.bindBuffer(gl.ARRAY_BUFFER, buffer);
+            gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1,-1, 1,-1, -1,1, 1,1]), gl.STATIC_DRAW);
+
+            const posLoc = gl.getAttribLocation(program, 'position');
+            gl.enableVertexAttribArray(posLoc);
+            gl.vertexAttribPointer(posLoc, 2, gl.FLOAT, false, 0, 0);
+
+            texture = gl.createTexture();
+            gl.bindTexture(gl.TEXTURE_2D, texture);
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.LINEAR);
+            gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.LINEAR);
+        }
+
+        function render(now) {
+            const deltaTime = (now - lastTime) / 1000;
+            lastTime = now;
+            internalClock += deltaTime;
+
+            if (video.readyState >= video.HAVE_CURRENT_DATA) {
+                gl.activeTexture(gl.TEXTURE0);
+                gl.bindTexture(gl.TEXTURE_2D, texture);
+                gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, video);
+                
+                gl.uniform2f(gl.getUniformLocation(program, 'uResolution'), canvas.width, canvas.height);
+                gl.uniform1f(gl.getUniformLocation(program, 'uTime'), internalClock);
+                gl.uniform1f(gl.getUniformLocation(program, 'uAmplitude'), parseFloat(params.amp.value));
+                gl.uniform1f(gl.getUniformLocation(program, 'uFrequency'), parseFloat(params.freq.value));
+                gl.uniform1f(gl.getUniformLocation(program, 'uSpeed'), parseFloat(params.speed.value));
+                gl.uniform2f(gl.getUniformLocation(program, 'uCenter'), parseFloat(params.cx.value), 1.0 - parseFloat(params.cy.value));
+
+                gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+                
+                document.getElementById('currentTime').innerText = formatTime(video.currentTime);
+                if(!isRecording) {
+                    seekBar.value = video.currentTime;
+                    progressFill.style.width = (video.currentTime / video.duration * 100) + '%';
+                }
+            }
+            requestAnimationFrame(render);
+        }
+
+        Object.keys(params).forEach(key => {
+            params[key].addEventListener('input', (e) => {
+                document.getElementById(`val-${key}`).innerText = parseFloat(e.target.value).toFixed(2);
+            });
+        });
+
+        function formatTime(sec) {
+            return `${Math.floor(sec/60)}:${Math.floor(sec%60).toString().padStart(2,'0')}`;
+        }
+
+        videoInput.onchange = (e) => {
+            const file = e.target.files[0];
+            if (!file) return;
+            video.src = URL.createObjectURL(file);
+            video.play();
+            status.innerText = "Syncing Shader...";
+            
+            video.onloadedmetadata = () => {
+                canvas.width = video.videoWidth;
+                canvas.height = video.videoHeight;
+                gl.viewport(0, 0, canvas.width, canvas.height);
+                status.innerText = "Active";
+                exportBtn.disabled = false;
+                seekBar.max = video.duration;
+                document.getElementById('duration').innerText = formatTime(video.duration);
+            };
+        };
+
+        seekBar.oninput = () => { video.currentTime = seekBar.value; };
+
+        exportBtn.onclick = () => {
+            if (isRecording) return;
+            isRecording = true;
+            const chunks = [];
+            video.currentTime = 0;
+            video.play();
+            
+            const stream = canvas.captureStream(60); 
+            const rec = new MediaRecorder(stream, { mimeType: 'video/webm;codecs=vp9' });
+
+            rec.ondataavailable = (e) => chunks.push(e.data);
+            rec.onstop = () => {
+                const blob = new Blob(chunks, { type: 'video/webm' });
+                const a = document.createElement('a');
+                a.href = URL.createObjectURL(blob);
+                a.download = 'smooth_shader_export.webm';
+                a.click();
+                status.innerText = "Exported";
+                exportBtn.disabled = false;
+                isRecording = false;
+            };
+
+            rec.start();
+            status.innerText = "Recording Smoothly...";
+            exportBtn.disabled = true;
+            video.onended = () => rec.stop();
+        };
+
+        initGL();
+        requestAnimationFrame(render);
+    </script>
+</body>
+</html>
+
+```
+                      
